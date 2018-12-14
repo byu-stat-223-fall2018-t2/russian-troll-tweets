@@ -1,0 +1,215 @@
+---
+title: "Tweet EDA"
+output: html_notebook
+---
+
+If there are packages you don't have, use `install.packages("package_name")`
+```{r setup}
+# Packages ----
+library(tidyverse)
+library(lubridate)
+library(tidytext)
+
+# Plot defaults ----
+theme_set(theme_bw())
+
+# Knitr options ----
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Data
+List all `.csv` files using the [`fs`](https://github.com/r-lib/fs) package.
+```{r data}
+csv_files <- fs::dir_ls(regexp = "*.csv$")
+```
+
+Read in all the files in a list called `tweets_list` using the
+[`purrr`](https://purrr.tidyverse.org/) package.
+```{r data-list}
+tweets_list <- map(csv_files, read_csv)
+```
+
+Check the data for problems that occured when parsing.
+```{r}
+problems_df <- map_df(tweets_list, problems)
+```
+
+Count the columns and issues that occured.
+```{r}
+problems_df  %>% 
+  count(col, expected)
+```
+
+Check column types of problem columns.
+```{r}
+tweets_list %>% 
+  map_df(~select(., unique(problems_df$col)) %>% 
+        map_df(class))
+```
+
+Look at problem columns.
+```{r}
+problems_df %>% 
+  filter(col == "post_type")
+```
+
+Address issues on data read.
+```{r}
+tweets_list <- map(csv_files, 
+                   read_csv, 
+                   col_types = cols(post_type = col_character(), 
+                                    tco3_step1 = col_character(), 
+                                    alt_external_id = col_character(),
+                                    external_author_id = col_character()))
+```
+
+Recheck problem columns.
+```{r}
+tweets_list %>% 
+  map_df(~select(., unique(problems_df$col)) %>% 
+        map_df(class))
+```
+
+Recheck for any new / persistent problems.
+```{r}
+map_df(tweets_list, problems)
+```
+
+Combine list data into single `tibble`.
+```{r}
+tweets <- map_df(tweets_list, bind_rows)
+```
+
+## Explore
+Look at the the first few rows of the data.
+```{r}
+head(tweets)
+```
+
+Notice that date columns have been read in as character. Convert these to dates.
+```{r}
+tweets <- tweets %>% 
+  mutate(publish_date_dttm = mdy_hm(publish_date),
+         harvested_date_dttm = mdy_hm(harvested_date),
+         publish_date_d = date(publish_date_dttm),
+         pubish_date_h = hour(publish_date_dttm))
+```
+
+Count tweets by `publish_date_d` and `account_type`.
+```{r}
+date_counts <- tweets %>% 
+  count(publish_date_d, account_type)
+```
+
+Plot `date_counts`
+```{r}
+date_counts %>% 
+  ggplot(aes(x = publish_date_d, y = n, col = account_type)) +
+  geom_line(show.legend = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  facet_wrap(~fct_reorder(account_type, -n, sum)) +
+  labs(title = "Daily tweets by account type",
+       x = "",
+       y = "")
+```
+
+Count tweets by hour of publication.
+```{r}
+hours_counts <- tweets %>% 
+  count(publish_date_h)
+```
+
+Plot `hour_counts`.
+```{r}
+hours_counts %>% 
+  ggplot(aes(x = publish_date_h, y = n, fill = n)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Publication Hour",
+       y = "",
+       title = "Tweets by Hour")
+```
+
+Check how many different `account_type` values there are and how many of each level are represented.
+```{r}
+tweets %>% 
+  count(account_type)
+```
+
+Create condensed account_type groups.
+```{r}
+tweets <- tweets %>% 
+  mutate(account_type_c = fct_lump(account_type, n = 4))
+```
+
+Count the newly condensed groups.
+```{r}
+tweets %>% 
+  count(account_type_c)
+```
+
+Count tweets by date and new `account_type` groups.
+```{r}
+date_counts <- tweets %>% 
+  count(publish_date_d, account_type_c)
+```
+
+Plot new `date_counts`.
+```{r}
+date_counts %>% 
+  ggplot(aes(x = publish_date_d, y = n, col = account_type_c)) +
+  geom_line(show.legend = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  facet_wrap(~fct_reorder(account_type_c, -n, sum)) +
+  labs(title = "Daily tweets by account type",
+       x = "",
+       y = "")
+```
+
+## Tidytext
+[`tidytext`](https://github.com/juliasilge/tidytext) is an R package for text analysis.
+Grab a sample of `tweets`
+```{r}
+set.seed(35487)
+tweets_s <- tweets %>% 
+  # Remove non-English
+  filter(language == "English") %>% 
+  sample_n(50000)
+```
+
+Separate out tokens in tweets. In other words, create each word of `content` as it's own row.
+```{r}
+tweets_s_tokens <- tweets_s %>% 
+  select(external_author_id, content, account_type_c, publish_date_d) %>% 
+  unnest_tokens(output = words, input = content)
+```
+
+Remove stop words (common words)
+```{r}
+tweets_s_tokens <- tweets_s_tokens %>% 
+  anti_join(get_stopwords(), by = c("words" = "word")) %>% 
+  filter(!words %in% c("t.co", "http", "https"))
+```
+
+Count most common words by `account_type`.
+```{r}
+word_counts <- tweets_s_tokens %>% 
+  count(words, account_type_c, sort = TRUE)
+```
+
+Plot most common words by `account_type`
+```{r}
+word_counts %>% 
+  group_by(account_type_c) %>% 
+  top_n(10) %>% 
+  ggplot(aes(x = fct_reorder(words, n, mean), y = n)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  facet_wrap(~account_type_c, scales = "free") +
+  labs(x = "",
+       y = "",
+       title = "Common word counts by account type")
+```
+
+
